@@ -10,6 +10,8 @@
 local RS = game:GetService("ReplicatedStorage")
 local CAS = game:GetService("ContextActionService")
 
+local Promise = require(game:GetService("ReplicatedStorage"):WaitForChild("Packages"):WaitForChild("Promise"))
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
@@ -26,8 +28,10 @@ local popsNeeded = 3
 local popsCompleted = 0
 local direction = 1
 local speed = 1
-local sliderWidth = 20
 local running = false
+local atm = nil
+
+local DistancePromise = nil
 
 function resetGame()
     print("resetting pos")
@@ -42,6 +46,7 @@ function endGame()
     running = false
     RunService:UnbindFromRenderStep("HackATM")
     CAS:UnbindAction("AtmHackClick")
+    if DistancePromise then DistancePromise:cancel() end
     HackUI:Destroy()
 end
 
@@ -50,6 +55,37 @@ function moveSuccessArea()
     local selectedValue = (math.random(0, 100) / 100) * successRange
 
     targetZone.Position = UDim2.fromScale(selectedValue, 0)
+end
+
+function CreateDistanceCheckPromise()
+    return Promise.new(function(resolve, reject, onCancel)
+        local enabled = true
+        local rangeToHack = 7.5
+        local player = game.Players.LocalPlayer
+
+        local function stopped()
+            enabled = false
+            endGame()
+        end
+
+        onCancel(stopped)
+
+        while enabled do
+            task.wait(1/10)
+
+            local char = player.Character
+            if not char then continue end
+
+            local hrp = char.HumanoidRootPart
+            if not hrp then continue end
+
+            local hrpPosition = hrp.Position
+            local atmPosition = atm.Position
+            local distance = (hrpPosition - atmPosition).Magnitude
+
+            if distance > rangeToHack then stopped() end
+        end
+    end)
 end
 
 function updateSlider(dt)
@@ -115,7 +151,8 @@ function HackingClickHandler(_, inputState, _)
     checkPop()
 end
 
-HackEvent.OnClientEvent:Connect(function()
+function StartProceedure(atmObject)
+    print("Starting")
     if running then return end
 
     HackUI = HackUiInstance:Clone()
@@ -124,13 +161,28 @@ HackEvent.OnClientEvent:Connect(function()
     targetZone = frame:WaitForChild("TargetZone")
     status = frame:WaitForChild("Status")
 
-
+    atm = atmObject
     HackUI.Parent = player.PlayerGui
 	resetGame()
 
-    print("bound to render")
+    DistancePromise = CreateDistanceCheckPromise()
     RunService:BindToRenderStep("HackATM", 1000, updateSlider)
     CAS:BindAction("AtmHackClick", HackingClickHandler, false, Enum.UserInputType.MouseButton1)
-end)
+end
 
 
+
+--#region Set Up ATMs
+repeat task.wait(1) until game:IsLoaded()
+local atms = workspace:WaitForChild("Atms"):GetChildren()
+
+for _, atmObject in pairs(atms) do
+    local prompt = atmObject.ProximityPrompt
+
+    prompt.Triggered:Connect(function()
+        StartProceedure(atmObject)
+    end)
+end
+
+
+--#endregion
