@@ -79,6 +79,22 @@ local function newPositionCapturePromise()
         local currentTime = time()
         serverSession._logStartTime = currentTime
 
+        local function LogInitalPlayerPosRot()
+            for _, player in pairs(Players:GetPlayers()) do
+                local character = player.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+                if not hrp then continue end
+
+                table.insert(serverSession.movementLog[player.UserId], {
+                    time = currentTime,
+                    hrpPosition = hrp.Position,
+                    hrpRotation = hrp.Orientation
+                })
+            end
+        end
+
+        LogInitalPlayerPosRot()
+
         while enabled do
             for _, player in pairs(Players:GetPlayers()) do
                 currentTime = time()

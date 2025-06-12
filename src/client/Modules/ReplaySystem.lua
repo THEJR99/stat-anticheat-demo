@@ -17,11 +17,12 @@ ReplaySystem._isRunning = false
 ReplaySystem._startTime = 0
 
 ReplaySystem.Data = {
-    PlayerLogStartTime = {}, -- { {userId = Id, startTime = time}, ... } --
+    PlayerLogStartTime = {}, -- { {UserId = Id, StartTime = time}, ... }  (IN DESCENDING ORDER) --
     ReplayDummys = {
         Reserve = {}, -- {Instance, ...} --
         InUse = {}-- {userId = Instance, ...} --
     },
+    ActivePlayerReplays = {} -- { {UserId = id, CurrentFrame = #, CurrentBufferFrame = #}, ... }  |  StartFrame --
 }
 
 
@@ -31,8 +32,12 @@ function ReplaySystem:_SetPlayerLogStartTime()
 
     for userId, logs in pairs(movementLogs) do
         local firstLog = logs[1]
-        table.insert(self.Data.PlayerLogStartTime, {firstLog.time} )
+        table.insert(self.Data.PlayerLogStartTime, {UserId = userId, StartTime = firstLog.time} )
     end
+
+    table.sort(self.Data.PlayerLogStartTime, function(a, b)
+        return a.StartTime > b.StartTime
+    end)
 end
 
 
@@ -155,7 +160,37 @@ function ReplaySystem:Start()
 
     local initalCharacters = self:_GetInitialPlayers()
 
-    local function initalizeStartingPlayerPositions()
+    local function SetStartPlayerFirstFrame(plrList) -- {UserId = startFrameTime, ...} Sets all userIds in list as key, then sets value as 1. (1st frame already complete)
+        local newList = {}
+        for _, userId in pairs(plrList) do
+            local data = {UserId = userId, CurrentFrame = 1, _CurrentBufferFrame = 1}
+            table.insert(newList, data)
+        end
+
+        -- {UserId = id, CurrentFrame = #, CurrentBufferFrame = #} --
+        self.Data.ActivePlayerReplays = newList
+    end
+
+    local function RemoveStartPlayersFromNextStartList() -- Removes the starter player's from the nextStartTime list to prevent two copies of the starter characters
+        local totalRemoved = 0
+        local toBeRemoved = initalCharacters
+        for index = 1, #self.Data.PlayerLogStartTime do -- Loops through Start Times
+            local currentData = self.Data.PlayerLogStartTime[index]
+
+            for removeIndex, userId in pairs(toBeRemoved) do -- Loops through list to remove from start times
+                if currentData.UserId ~= userId then continue end -- Skip if name does not match
+                table.remove(self.Data.PlayerLogStartTime, index)
+                table.remove(toBeRemoved, removeIndex) -- Remove from BOTH lists
+                break
+            end
+
+            if #toBeRemoved == 0 then -- If all are removed, break from the function
+                return
+            end
+        end
+    end
+
+    local function initalizeStartingPlayerPositions() -- Renders the first frame of the start players position log.
         for _, userId in pairs(initalCharacters) do
             local dummy = table.remove(self.Data.ReplayDummys.Reserve, 1)
             local pos: Vector3 = self._replayData.movementLog[userId].hrpPosition
@@ -168,7 +203,72 @@ function ReplaySystem:Start()
         end
     end
 
-    initalizeStartingPlayerPositions()
+    SetStartPlayerFirstFrame(initalCharacters) -- Loads Data for start players on Current Loaded List 
+    initalizeStartingPlayerPositions() -- Render first characters
+    RemoveStartPlayersFromNextStartList() -- Stop first characters rendering twice
+
+
+    local function NewReplayPromise(_____self)
+        return Promise.new(function(resolve, reject, onCancel)
+            local enabled = true
+            local sampleRate = 5
+
+            local CurrentFrameTime = self._replayData._logStartTime
+
+            local startTimes = self.Data.PlayerLogStartTime -- uid = st --
+            local nextStartTime = startTimes[1].StartTime
+
+            --self.Data.ActivePlayerReplays -- { userId = currentFrame } --
+
+            local function CheckForNewStart() : boolean -- Returs true if the next start time is now.
+                if CurrentFrameTime < nextStartTime then return end
+
+                print("Start next player!")
+                return true
+            end
+
+            local function RenderNewFrames()
+                local activeReplays = self.Data.ActivePlayerReplays
+
+                for _, data in pairs(activeReplays) do
+                    local userId = data.UserId
+                    local currentFrame = data.CurrentFrame
+                    local frameData = self._replayData.movementLog[userId]
+                    local totalFrames = #frameData
+
+                    local isLastFrame = totalFrames == currentFrame
+
+                    if isLastFrame then
+                        print("Do something to end it")
+                    end
+
+                    local nextFrameData = frameData[currentFrame+1]
+
+                    data.CurrentFrame = currentFrame + 1
+                end
+            end
+
+
+            local self_data = {
+                PlayerLogStartTime = {}, -- { {UserId = Id, StartTime = time}, ... }  (IN DESCENDING ORDER) --
+                ReplayDummys = {
+                    Reserve = {}, -- {Instance, ...} --
+                    InUse = {}-- {userId = Instance, ...} --
+                },
+                ActivePlayerReplays = {} -- { {UserId = id, CurrentFrame = #, CurrentBufferFrame = #}, ... }  |  StartFrame --
+            }
+
+
+
+            while enabled do
+                CheckForNewStart()
+
+                task.wait(1/sampleRate)
+            end
+
+
+        end)
+    end
 
 
     -- Use a Promise to make a loop that renders a frame based off an interval variable --
@@ -178,7 +278,7 @@ function ReplaySystem:Start()
 
 	-- Get earliest movement timestamp
 	local minTime = math.huge
-	for _, logs in pairs(self._replayData.MovementLog) do
+	for _, logs in pairs(self._replayData.movementLog) do
 		if logs[1] and logs[1].time < minTime then
 			minTime = logs[1].time
 		end
@@ -186,7 +286,7 @@ function ReplaySystem:Start()
 	self._startTime = minTime
 
 	-- Spawn characters
-	for userId, logs in pairs(self._replayData.MovementLog) do
+	for userId, logs in pairs(self._replayData.movementLog) do
 		local char = Instance.new("Model")
 		char.Name = "Replay_" .. tostring(userId)
 		local hrp = Instance.new("Part")
