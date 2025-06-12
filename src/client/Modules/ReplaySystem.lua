@@ -207,6 +207,10 @@ function ReplaySystem:Start()
     initalizeStartingPlayerPositions() -- Render first characters
     RemoveStartPlayersFromNextStartList() -- Stop first characters rendering twice
 
+    -- Frame alignment --
+    -- If frame is within tolerance (5% of frame length), snap it to time.  |  Replay Time = 1.2, Frame Time = 1.204 -> New Frame Time = 1.204
+    -- FrameLag > tolerance (5%) & inside 1 frame -> (lateFrameTime-replayClock)/(nextFrameTime - currentFrameTime) = InterpolationTime
+    -- FrameLag > tolerance (5%) & outside 1 frame -> Set replayClock to frame time + set position with no tween
 
     local function NewReplayPromise(_____self)
         return Promise.new(function(resolve, reject, onCancel)
