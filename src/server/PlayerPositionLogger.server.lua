@@ -15,13 +15,18 @@ local serverSession = {
     sessionStartTimeEpoch = os.time(), -- epoch timestamp (Server Start Time)
     sampleRate = SAMPLE_INTERVAL_PER_SECOND,
     _logStartTime = 0,
-    joinLeaveLog = {},            -- array of { userId = number, time = os.time(), action = "join"/"leave" }
+    joinLeaveLog = {},    -- array of { userId = number, time = os.time(), action = "join"/"leave" }
+    --playerAliasLog = {},  -- gives each player a alias/number for sake of data storage later --
     movementLog = {},
 }
 
 local configs = {
     captureEnabled = false,           -- [userId] = { { time = t, hrpPosition = Vector3, hrpRotation = Vector3 }, ... }
     capturePromise = nil
+}
+
+local systemData = {
+    CurrentTime = 0
 }
 
 local function serializeVectors(data)
@@ -60,10 +65,6 @@ local function newPositionCapturePromise()
 
             local sessionLog = HTTP:JSONEncode(toJson)
 
-            local leaveLog = HTTP:JSONEncode(serverSession.joinLeaveLog)
-            local movementLog = HTTP:JSONEncode(serverSession.movementLog)
-
-            --print("Join/Leave Log:\n\n\n" .. leaveLog .. "\n\n\nMovement Log:\n\n\n" .. movementLog)
             print("Replay Log Complete:\n\n\n\n" .. sessionLog)
         end
 
@@ -76,38 +77,43 @@ local function newPositionCapturePromise()
 
         onCancel(cancel)
 
-        local currentTime = time()
-        serverSession._logStartTime = currentTime
+        systemData.CurrentTime = time()
+        serverSession._logStartTime = systemData.CurrentTime
 
         local function LogInitalPlayerPosRot()
+            local logData = {time = systemData.CurrentTime}
+
             for _, player in pairs(Players:GetPlayers()) do
                 local character = player.Character
                 local hrp = character and character:FindFirstChild("HumanoidRootPart")
                 if not hrp then continue end
 
-                table.insert(serverSession.movementLog[player.UserId], {
-                    time = currentTime,
+                logData[player.UserId] = {
                     hrpPosition = hrp.Position,
                     hrpRotation = hrp.Orientation
-                })
+                }
             end
+
+            table.insert(serverSession.movementLog, logData)
         end
 
         LogInitalPlayerPosRot()
 
         while enabled do
+            local logData = {time = systemData.CurrentTime}
+
             for _, player in pairs(Players:GetPlayers()) do
-                currentTime = time()
                 local character = player.Character
                 local hrp = character and character:FindFirstChild("HumanoidRootPart")
                 if not hrp then continue end
 
-                table.insert(serverSession.movementLog[player.UserId], {
-                    time = currentTime,
+                logData[player.UserId] = {
                     hrpPosition = hrp.Position,
                     hrpRotation = hrp.Orientation
-                })
+                }
             end
+
+            table.insert(serverSession.movementLog, logData)
 
             logCount += 1
             task.wait(1/SAMPLE_INTERVAL_PER_SECOND)
@@ -122,7 +128,7 @@ end
 local function handlePlayerAdded(player)
     table.insert(serverSession.joinLeaveLog, {
         userId = player.UserId,
-        time = time(),
+        time = systemData.CurrentTime,
         action = "join"
     })
 
@@ -132,7 +138,7 @@ end
 local function handlePlayerRemoving(player)
     table.insert(serverSession.joinLeaveLog, {
         userId = player.UserId,
-        time = time(),
+        time = systemData.CurrentTime,
         action = "leave"
     })
 end
@@ -156,19 +162,6 @@ end
 Players.PlayerAdded:Connect(handlePlayerAdded)
 Players.PlayerRemoving:Connect(handlePlayerRemoving)
 CaptureRemote.OnServerEvent:Connect(handleCaptureEvent)
-
--- MOVEMENT TRACKING
-
-
-local MooovementLog = {
-    _2556503 = {
-        {
-            time = 123,
-            hrpPosition = Vector3.new(),
-            hrpRotation = Vector3.new()
-        }
-    }
-}
 
 
 

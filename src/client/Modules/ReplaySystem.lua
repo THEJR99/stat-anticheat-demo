@@ -2,6 +2,7 @@
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+local RS = game:GetService("RunService")
 local TS = game:GetService("TweenService")
 
 -- Dependencies
@@ -12,41 +13,34 @@ local REPLAY_STEP_RATE = 0.2 -- seconds per frame (5Hz replay)
 
 -- Replay system
 local ReplaySystem = {}
-ReplaySystem._replayData = nil
+ReplaySystem._importedData = nil
 ReplaySystem._replayPromise = nil
 ReplaySystem._isRunning = false
 ReplaySystem._startTime = 0
 
 ReplaySystem.Data = {
     PlayerLogStartTime = {}, -- { {UserId = Id, StartTime = time}, ... }  (IN DESCENDING ORDER) --
+    PlayerLogStopTime = {}, -- { {UserId = Id, EndTime = time}, ... }  (IN DESCENDING ORDER) --
     ReplayDummys = {
         Reserve = {}, -- {Instance, ...} --
         InUse = {}-- {userId = Instance, ...} --
     },
     ActivePlayerReplays = {}, -- { {UserId = id, CurrentFrame = #, CurrentBufferFrame = #}, ... }  |  StartFrame --
     NameList = {}, -- { UserId = PlayerName }
+
+
+    _ReplayData = {}, -- { { time = t, {userid = {pos, rot}, ...} } }
+    _ReplayCacheData = { CurrentPosition = 0, FrameData = {} }, -- FrameData = { {time = t, playerLogs = { userId = {hrpPosition = Vector3(), hrpRotation = Vector3()}, ... } } }
+    _ReplayCacheSize = 50, -- Caches x frames left and right.  |  50 - TimePos - 50
+    ReplayClock = 0,
 }
 
-
-function ReplaySystem:_SetPlayerLogStartTime()
-    local rawData = self._replayData
-    local movementLogs = rawData.movementLog
-
-    for userId, logs in pairs(movementLogs) do
-        local firstLog = logs[1]
-        table.insert(self.Data.PlayerLogStartTime, {UserId = userId, StartTime = firstLog.time} )
-    end
-
-    table.sort(self.Data.PlayerLogStartTime, function(a, b)
-        return a.StartTime > b.StartTime
-    end)
-end
 
 
 function ReplaySystem:_InitializeReplayDummys() -- Makes all dummys needed and sends to reserve. In use are labeled by {UserId = Instance}.
     local dummyModel = game:GetService("ReplicatedStorage").Prefabs.ReplayDummy
 
-    local joinLeaveLog = self._replayData.joinLeaveLog
+    local joinLeaveLog = self._importedData.joinLeaveLog
 
     local function getMaxLoadedPlayers()
         local currentLoaded = 0
@@ -81,6 +75,14 @@ function ReplaySystem:_InitializeReplayDummys() -- Makes all dummys needed and s
 end
 
 
+function ReplaySystem:_SetStartStopTimes()
+    for userId, logs in pairs(self._importedData.movementLog) do
+        self.Data.PlayerLogStartTime[userId] = logs[1].time
+        self.Data.PlayerLogStopTime[userId] = logs[#logs].time
+    end
+end
+
+
 function ReplaySystem:LoadReplayData(saveName: string, jsonString)
     local saveFile = game:GetService("ReplicatedStorage").Shared.ReplayFiles:FindFirstChild(saveName)
     if not saveFile then warn("Replay file " .. saveName .. " not found!!!") return end
@@ -88,15 +90,15 @@ function ReplaySystem:LoadReplayData(saveName: string, jsonString)
     saveFile = require(saveFile)
 
 	self:Reset()
-    self:_SetPlayerLogStartTime()
-	self._replayData = HttpService:JSONDecode(saveFile)
+    self:_SetStartStopTimes()
+	self._importedData = HttpService:JSONDecode(saveFile)
 end
 
 
 
 function ReplaySystem:_GetInitialPlayers() : table -- { UserId, ... } | Gets first player's that are should be loaded into the game when the recording started.
-    local replayStart = self._replayData._logStartTime
-    local joinLeaveLog = self._replayData.joinLeaveLog
+    local replayStart = self._importedData._logStartTime
+    local joinLeaveLog = self._importedData.joinLeaveLog
 
     local playersToLoad = {} -- {UID = time}
 
@@ -154,8 +156,134 @@ function ReplaySystem:Stop()
 	end
 end
 
+function ReplaySystem:_PlayReplay()
+    local sampleRate = 5
+    local frameSlipTolerance = .1 -- Out of 1 --
+    local playbackDirection = 1
+    local playbackSpeed = 1
+    local calculatedPlaybackSpeed = (1/sampleRate)*playbackSpeed
+    local startTime = self._importedData._logStartTime
+
+    RS:BindToRenderStep("ReplaySystem", Enum.RenderPriority.Camera-1, function(deltaTime)
+
+        local function setPlayerPositions(targetTime) -- Sets replay dummy's cframes (getInterpolatedCFrames) --
+            local timeFromStart = targetTime - startTime
+            local framesBetweenEstimate = math.floor(timeFromStart/(1/sampleRate))
+
+            local function findFrame(frameNumber: number) : number
+                local goBackFrames = self._importedData.movementLog[frameNumber] > targetTime
+                local goForwardFrames = self._importedData.movementLog[frameNumber] < targetTime
+                local isCorrectFrame = (not goBackFrames) and (not goForwardFrames)
+
+                if isCorrectFrame then
+                    return frameNumber
+                end
+
+                if goBackFrames then
+                    return findFrame(frameNumber-1)
+
+                elseif goForwardFrames then
+                    return findFrame(frameNumber+1)
+                end
+
+                error("should not have reached this part of execution!")
+            end
+
+            local function getDummy(_UserId) : Model
+                    local dummyFromInUse = self.Data.ReplayDummys.InUse[_UserId]
+                    if dummyFromInUse then return dummyFromInUse end
+
+                    local replayDummy = table.remove(self.Data.ReplayDummys.Reserve, 1)
+                    self.Data.ReplayDummys[_UserId] = replayDummy
+                    replayDummy.Parent = game.Workspace.ReplayFolder
+
+                    return replayDummy
+            end
+
+            local function checkForUnusedDummys(_userIdList)
+                for userId, dummy in pairs(self.Data.ReplayDummys.InUse) do
+                    if _userIdList[userId] then return end
+
+                    dummy.NameTag.TextLabel.Text = ""
+                    dummy.Parent = game:GetService("ReplicatedStorage").Temp
+                    table.insert(self.Data.ReplayDummys.Reserve, dummy)
+                    self.Data.ReplayDummys.InUse[userId] = nil
+                end
+            end
+
+            local function updateUI(currentFrameNumber, currentReplayDuration)
+                local mainFrame = game.Players.LocalPlayer.PlayerGui.ReplayDisplay.logContent
+                local timeText = mainFrame.TimeLabel
+                local frameText = mainFrame.FrameLabel
+
+                timeText.Text = tostring(currentReplayDuration)
+                frameText.text = tostring(currentFrameNumber)
+            end
+
+            local frameNumber = findFrame(framesBetweenEstimate)
+            local userIdList = {} -- For checking if any dummys are not in use now --
+
+            local frameA = self._importedData.movementLog[frameNumber]
+            local frameB = self._importedData.movementLog[frameNumber+1]
+
+            local frameTimeA = frameA.time
+            local frameTimeB = frameB.time
+
+            local replayClockTime = self.Data.ReplayClock
+            local frameDrift = (frameTimeB.time - frameTimeA.time) - (sampleRate)
+            local isWithinFrameTolerance =  frameDrift <= (sampleRate * frameSlipTolerance)
+            local outsideToleranceInFrame = frameDrift <= sampleRate
+
+            local movement = deltaTime * playbackSpeed * playbackDirection
+            local alpha
+
+            if isWithinFrameTolerance then
+                alpha = (replayClockTime - frameTimeA + movement) / (frameTimeB.time - frameTimeA.time)
+
+            elseif outsideToleranceInFrame then
+                alpha = (replayClockTime - frameTimeA + movement) / (frameTimeB.time - frameTimeA.time)
+                print("Frame misalignment!")
+            else -- Is out of sync by a frame or more
+
+            end
+
+            for userId, data in pairs(frameA) do
+                if userId == 'time' then continue end
+                local posA = Vector3.new(data["hrpPosition"][1], data["hrpPosition"][2], data["hrpPosition"][3])
+                local rotA = Vector3.new( math.rad(data["hrpRotation"][1]), math.rad(data["hrpRotation"][2]), math.rad(data["hrpRotation"][3]) )
+
+                local dataB = frameB[userId]
+                local posB = Vector3.new(dataB["hrpPosition"][1], dataB["hrpPosition"][2], dataB["hrpPosition"][3])
+                local rotB = Vector3.new( math.rad(dataB["hrpPosition"][1]), math.rad(dataB["hrpPosition"][2]), math.rad(dataB["hrpPosition"][3]))
+
+                local newPosition = posA:Lerp(posB, alpha)
+                local newRotation = rotA:Lerp(rotB, alpha)
+
+                local newCFrame = CFrame.new(newPosition) * CFrame.Angles(newRotation.X, newRotation.Y, newRotation.Z)
+
+                -- Check if replay dummys are in replay, if not - insert and position them --
+
+                userIdList[userId] = true
+                local ReplayDummy = getDummy(userId)
+                ReplayDummy:PivotTo(newCFrame)
+            end
+
+            checkForUnusedDummys(userIdList)
+
+            updateUI(frameNumber, timeFromStart)
+            self.Data.ReplayClock = frameTimeA + alpha * (frameTimeB - frameTimeA)
+        end
+
+        setPlayerPositions(self.Data.ReplayClock)
+    end)
+end
+
+function ReplaySystem:_PauseReplay()
+    RS:UnbindFromRenderStep("ReplaySystem")
+end
+
 function ReplaySystem:Start()
-	if not self._replayData then return end
+	if not self._importedData then return end
 	self._isRunning = true
 
     self:_InitializeReplayDummys()
@@ -228,7 +356,7 @@ function ReplaySystem:Start()
             end
         end)
 
-        local firstFrameReplayData = self._replayData.movementLog[UserId][1]
+        local firstFrameReplayData = self._importedData.movementLog[UserId][1]
         local firstPos = firstFrameReplayData.hrpPosition
         local firstRot = firstFrameReplayData.hrpRotation
         SetNewCharacterPosition(newDummy, firstPos, firstRot)
@@ -262,8 +390,8 @@ function ReplaySystem:Start()
     local function initalizeStartingPlayerPositions() -- Renders the first frame of the start players position log.
         for _, userId in pairs(initalCharacters) do
             local dummy = table.remove(self.Data.ReplayDummys.Reserve, 1)
-            local pos: Vector3 = self._replayData.movementLog[userId].hrpPosition
-            local rot: Vector3 = self._replayData.movementLog[userId].hrpRotation
+            local pos: Vector3 = self._importedData.movementLog[userId].hrpPosition
+            local rot: Vector3 = self._importedData.movementLog[userId].hrpRotation
 
             local newCFrame = CFrame.new(pos) * CFrame.Angles(math.rad(rot.X), math.rad(rot.Y), math.rad(rot.Z))
 
@@ -281,7 +409,7 @@ function ReplaySystem:Start()
         return Promise.new(function(resolve, reject, onCancel)
             local enabled = true
             local sampleRate = 5
-            local ReplayClockTime = self._replayData._logStartTime
+            local ReplayClockTime = self._importedData._logStartTime
 
             local startTimes = self.Data.PlayerLogStartTime -- uid = st --
             local nextStartTime = startTimes[1].StartTime
@@ -300,11 +428,12 @@ function ReplaySystem:Start()
 
             local function RenderNewFrames()
                 local activeReplays = self.Data.ActivePlayerReplays
+                local computedSampleRate = 1/sampleRate
 
                 for index, metaData in pairs(activeReplays) do
                     local userId = metaData.UserId
                     local currentFrame = metaData.CurrentFrame
-                    local frameData = self._replayData.movementLog[userId]
+                    local frameData = self._importedData.movementLog[userId]
                     local totalFrames = #frameData
 
                     local isLastFrame = totalFrames == currentFrame
@@ -314,11 +443,11 @@ function ReplaySystem:Start()
                         -- PLAYER LEFT GAME --
                     end
 
-                    local nextFrameData = frameData[currentFrame+1]
-                    local replayMetaData = self.Data.ActivePlayerReplays
+                    local nextFrameData = frameData[currentFrame+1] -- {time, pos, rot} --
+                    local replayMetaData = self.Data.ActivePlayerReplays -- {id, currFrame, buffFrame} --
                     local replayDummy = self.Data.ReplayDummys.InUse[userId]
 
-                    local nextFrameTimeOffset = nextFrameData.time - ReplayClockTime -- Ideally, should be 1/sampleRate
+                    local nextFrameTimeOffset = nextFrameData.time - ReplayClockTime -- (frameTime - clockTime) | Ideally, should be 1/sampleRate
                     local nextFrameTimeDrift = nextFrameTimeOffset - (1/sampleRate)
                     local frameDriftPercent = nextFrameTimeDrift / (1/sampleRate)
 
@@ -327,16 +456,16 @@ function ReplaySystem:Start()
                     print("Frame drift percentage: " .. frameDriftPercent)
 
                     local isWithinTolerance = (1/frameSlipTolerance) >= frameDriftPercent
-                    local isWithinFrame = true
-                    local isNotWithinFrame = true
+                    local isWithinFrame = nextFrameTimeDrift < (1/sampleRate)
+                    local isNotWithinFrame = (not isWithinFrame and not isWithinFrame)
                     local frameAdjusted = false
 
-                    local newPosition
-                    local newRotation
+                    local newPosition = nextFrameData.hrpPosition
+                    local newRotation = nextFrameData.hrpRotation
 
                     if isWithinTolerance then -- Sets position with smooth tween
                         print("Within tolerance")
-                        SetNewCharacterPosition()
+                        SetNewCharacterPosition(replayDummy, newPosition, newRotation, computedSampleRate)
 
                         frameAdjusted = true
                     end
