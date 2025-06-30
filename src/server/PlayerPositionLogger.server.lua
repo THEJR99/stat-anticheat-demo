@@ -6,7 +6,7 @@ local HTTP = game:GetService("HttpService")
 local Players = game:GetService("Players")
 
 -- SETTINGS
-local SAMPLE_INTERVAL_PER_SECOND = 5 -- How often to sample HRP data (in seconds)
+local SAMPLE_INTERVAL_PER_SECOND = 10 -- How often to sample HRP data (in seconds)
 
 -- SERVER METADATA
 local serverSession = {
@@ -47,7 +47,7 @@ local function serializeVectors(data)
 	return convert(data)
 end
 
-local function newPositionCapturePromise()
+local function PositionCapturePromise()
     print("Server-wide capture started")
 
     return Promise.new(function(resolve, _, onCancel)
@@ -60,7 +60,7 @@ local function newPositionCapturePromise()
             serverSession.movementLog =   serializeVectors(serverSession.movementLog)
 
             local toJson = serverSession
-            toJson = serializeVectors(toJson)
+            toJson = serializeVectors(serverSession)
 
 
             local sessionLog = HTTP:JSONEncode(toJson)
@@ -77,7 +77,7 @@ local function newPositionCapturePromise()
 
         onCancel(cancel)
 
-        systemData.CurrentTime = time()
+        systemData.CurrentTime = os.clock()
         serverSession._logStartTime = systemData.CurrentTime
 
         local function LogInitalPlayerPosRot()
@@ -100,6 +100,7 @@ local function newPositionCapturePromise()
         LogInitalPlayerPosRot()
 
         while enabled do
+            systemData.CurrentTime = os.clock()
             local logData = {time = systemData.CurrentTime}
 
             for _, player in pairs(Players:GetPlayers()) do
@@ -156,7 +157,7 @@ local function handleCaptureEvent(player, start)
 
     print("Starting new Server-Wide capture")
     configs.captureEnabled = true
-    configs.capturePromise = newPositionCapturePromise()
+    configs.capturePromise = PositionCapturePromise()
 end
 
 Players.PlayerAdded:Connect(handlePlayerAdded)

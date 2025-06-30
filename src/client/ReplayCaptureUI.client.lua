@@ -17,7 +17,7 @@ local frameCount = 0
 local function newCapturePromise()
     return Promise.new(function(_, _, onCancel)
         local go = true
-        local rate = 5
+        local rate = 10
 
         onCancel(function()
             go = false

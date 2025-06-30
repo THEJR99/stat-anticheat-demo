@@ -1,5 +1,0 @@
-local Logger = {}
-
-
-
-return Logger
