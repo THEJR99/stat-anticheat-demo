@@ -132,8 +132,6 @@ local function handlePlayerAdded(player)
         time = systemData.CurrentTime,
         action = "join"
     })
-
-    serverSession.movementLog[player.UserId] = {}
 end
 
 local function handlePlayerRemoving(player)
